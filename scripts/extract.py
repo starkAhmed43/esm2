@@ -6,11 +6,9 @@
 
 import argparse
 import pathlib
-
 import torch
-
-from esm import Alphabet, FastaBatchedDataset, ProteinBertModel, pretrained, MSATransformer
-
+from tqdm.auto import tqdm
+from esm import FastaBatchedDataset, pretrained, MSATransformer
 
 def create_parser():
     parser = argparse.ArgumentParser(
@@ -57,7 +55,22 @@ def create_parser():
     )
 
     parser.add_argument("--nogpu", action="store_true", help="Do not use GPU even if available")
+    parser.add_argument(
+        "--cuda",
+        type=int,
+        default=0,
+        help="Specify the CUDA core to run on (default is 0). Ignored if --nogpu is set.",
+    )
     return parser
+
+def validate_args(args):
+    if args.nogpu:
+        args.cuda = None
+    else:
+        if not torch.cuda.is_available():
+            raise ValueError("CUDA is not available but --nogpu is not set.")
+        if args.cuda < 0 or args.cuda >= torch.cuda.device_count():
+            raise ValueError(f"Invalid CUDA core specified: {args.cuda}. Available cores: 0 to {torch.cuda.device_count() - 1}")
 
 
 def run(args):
@@ -68,7 +81,7 @@ def run(args):
             "This script currently does not handle models with MSA input (MSA Transformer)."
         )
     if torch.cuda.is_available() and not args.nogpu:
-        model = model.cuda()
+        model = model.to(device=f"cuda:{args.cuda}")
         print("Transferred model to GPU")
 
     dataset = FastaBatchedDataset.from_file(args.fasta_file)
@@ -85,16 +98,13 @@ def run(args):
     repr_layers = [(i + model.num_layers + 1) % (model.num_layers + 1) for i in args.repr_layers]
 
     with torch.no_grad():
-        for batch_idx, (labels, strs, toks) in enumerate(data_loader):
-            print(
-                f"Processing {batch_idx + 1} of {len(batches)} batches ({toks.size(0)} sequences)"
-            )
+        for batch_idx, (labels, strs, toks) in enumerate(tqdm(data_loader, desc="Processing batches")):
             if torch.cuda.is_available() and not args.nogpu:
-                toks = toks.to(device="cuda", non_blocking=True)
+                toks = toks.to(device=f"cuda:{args.cuda}", non_blocking=True)
 
             out = model(toks, repr_layers=repr_layers, return_contacts=return_contacts)
 
-            logits = out["logits"].to(device="cpu")
+            #logits = out["logits"].to(device="cpu")
             representations = {
                 layer: t.to(device="cpu") for layer, t in out["representations"].items()
             }
@@ -130,10 +140,11 @@ def run(args):
                     args.output_file,
                 )
 
-
 def main():
     parser = create_parser()
     args = parser.parse_args()
+    validate_args(args)
+    print(f"Using CUDA core: {args.cuda}")
     run(args)
 
 if __name__ == "__main__":
